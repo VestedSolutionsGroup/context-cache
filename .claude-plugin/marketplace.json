@@ -1,0 +1,17 @@
+{
+  "name": "vsg",
+  "owner": {
+    "name": "Vested Solutions Group"
+  },
+  "metadata": {
+    "description": "Vested Solutions Group's Claude Code mods."
+  },
+  "plugins": [
+    {
+      "name": "context-cache",
+      "source": "./",
+      "description": "A countdown chip in the prompt footer that shows how long the one-hour prompt cache stays warm.",
+      "version": "1.0.0"
+    }
+  ]
+}

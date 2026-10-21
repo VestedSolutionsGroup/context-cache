@@ -1,0 +1,6 @@
+{
+  "description": "context-cache (Mod): ui.render{component=SessionMode}, session.start, session.attach, classic.SessionStart, turn.step, turn.complete, session.compact.",
+  "modules": [
+    "./register.ts"
+  ]
+}

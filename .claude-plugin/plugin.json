@@ -1,0 +1,9 @@
+{
+  "name": "context-cache",
+  "version": "1.0.0",
+  "description": "A countdown chip in the prompt footer that shows how long the one-hour prompt cache stays warm, in the terminal and the desktop app.",
+  "author": {
+    "name": "Vested Solutions Group"
+  },
+  "license": "MIT"
+}
