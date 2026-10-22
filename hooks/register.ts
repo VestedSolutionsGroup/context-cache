@@ -1,4 +1,4 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, ModelForkResult, Register } from 'claude-code'
 
 // The countdown chip: how long the one-hour prompt cache stays warm, drawn in
 // the prompt footer on the terminal and in the desktop app. Its glyph steps in
@@ -11,6 +11,10 @@ const MOONS = ['🌝', '🌖', '🌗', '🌘', '🌚']
 const COLD_MOON = '💀'
 const GLYPHS = ['●', '◕', '◑', '◔', '○']
 const COLD_GLYPH = '◌'
+// A prompt of 🔥 alone, spaces and an emoji variation selector aside, pings the cache instead of starting a turn.
+const PING = /^\s*🔥\uFE0F?\s*$/u
+const PING_PROMPT = 'Reply with the single word: warm'
+const NOTHING_TO_PING = '🔥 Nothing to ping until the next message'
 
 export type State = {
   drawing: boolean
@@ -49,6 +53,27 @@ export function seedFromStart(s: State, e: { source: string; seconds_since_last_
   else if ((e.source === 'resume' || e.source === 'fork') && typeof e.seconds_since_last_response === 'number') {
     s.lastRequestAt = now - e.seconds_since_last_response * 1000
   }
+}
+
+/** Whether a ping read the cache: it read the prefix and wrote under a tenth of that, or the prefix had gone. */
+export function pingWarmed(r: ModelForkResult | null): boolean {
+  if (!r || !('usage' in r)) return false
+  return r.usage.cache_read_input_tokens > 0 && r.usage.cache_creation_input_tokens < 0.1 * r.usage.cache_read_input_tokens
+}
+
+const tokens = (n: number) => n < 1000 ? String(n) : Math.round(n / 1000) + 'k'
+
+/** The line a 🔥 leaves in place of the prompt: what the ping read and wrote, or why it read nothing. */
+export function pingNote(r: ModelForkResult | null): string {
+  // Older engines answer null for a fork they did not send.
+  if (!r) return '🔥 The ping was not sent'
+  if (!('usage' in r)) return NOTHING_TO_PING
+  const { cache_read_input_tokens: read, cache_creation_input_tokens: wrote } = r.usage
+  if (pingWarmed(r)) return `🔥 Read ${tokens(read)} from the cache: warm for another hour`
+  if (read || wrote) return `🔥 Read ${tokens(read)} and wrote ${tokens(wrote)}: the cache had already gone`
+  if (r.isAnswered === false && r.reason === 'api-error') return `🔥 The ping failed (${r.status ?? r.error})`
+  if (r.isAnswered === false && r.reason === 'aborted') return '🔥 The ping was interrupted'
+  return '🔥 The ping read nothing from the cache'
 }
 
 /** Redraws when the chip's label or ring changes, then waits for the next change: the next 30-second step, or the next second in the last minute. */
@@ -147,6 +172,24 @@ export const register: Register = on => {
     if (e.usage && now - s.lastRequestAt > e.durationMs) s.lastRequestAt = now
     redraw($, s)
     return r
+  })
+
+  // 🔥 alone keeps the cache warm without a turn: one request over the conversation as last sent reads the whole
+  // cache, which restarts its hour, and the 🔥 never enters the conversation. A clock already cold is not pinged,
+  // since the ping would pay to write the whole cache again, as the next message will.
+  on('prompt.submit', async ($, e, next) => {
+    if (!PING.test(e.text) || e.attachments?.length) return next(e)
+    const at = await $.clock.now()
+    const c = countdown(s, at)
+    if (!c) return { drop: NOTHING_TO_PING }
+    if (c.level === 'cold') return { drop: '🔥 Not pinged: the cache has gone cold, and a ping would pay to write it again' }
+    const r = await $.model.fork({ prompt: PING_PROMPT }).catch(() => null)
+    // A request of the main conversation that went out while the ping was out stamped a later time.
+    if (pingWarmed(r)) {
+      s.lastRequestAt = Math.max(s.lastRequestAt, at)
+      redraw($, s)
+    }
+    return { drop: pingNote(r) }
   })
 
   // /compact runs no turn, so the chip restarts from the compaction's own summary request rather than waiting for the next turn.

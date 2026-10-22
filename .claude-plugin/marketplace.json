@@ -10,8 +10,8 @@
     {
       "name": "context-cache",
       "source": "./",
-      "description": "A countdown chip in the prompt footer that shows how long the one-hour prompt cache stays warm.",
-      "version": "1.0.0"
+      "description": "A countdown chip in the prompt footer that shows how long the one-hour prompt cache stays warm; a 🔥 prompt pings the cache to keep it warm.",
+      "version": "1.1.0"
     }
   ]
 }

@@ -1,6 +1,6 @@
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
-import type { On, RenderPropsOf, RenderSurface, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
+import type { ModelForkResult, ModelUsage, On, PromptSubmitInput, RenderPropsOf, RenderSurface, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { countdown, freshState, ringGlyph, seedFromStart } from '../hooks/register'
 
@@ -31,12 +31,21 @@ const summaryUsage = { input_tokens: 2000, output_tokens: 500, cache_read_input_
 
 type StepAnswer = 'response' | 'failed' | 'interrupted'
 
+const prompt = (text: string, over: Partial<PromptSubmitInput> = {}): PromptSubmitInput => ({ text, wait: false, origin: { kind: 'composer' }, ...over })
+const pingUsage = (read: number, wrote: number): ModelUsage => ({ input_tokens: 12, output_tokens: 3, cache_read_input_tokens: read, cache_creation_input_tokens: wrote })
+// A warm ping reads the conversation's prefix and writes nothing of it.
+const warmPing: ModelForkResult = { isAnswered: true, text: 'warm', usage: pingUsage(200000, 0) }
+// What a ping may come back as: a fork's result, null as older engines answer, or a refusal to send it.
+type PingAnswer = ModelForkResult | null | 'refused'
+
 // The world beneath the mod: the engine's answers, and a footer that draws the mode labels as one Text.
-// Each model step answers from `steps` (a response by default); a compaction makes its own summary request unless told otherwise.
-function world(on: On, opts: { noColor?: boolean; surfaces?: RenderSurface[]; compact?: 'request' | 'skip' | 'reused'; steps?: StepAnswer[] } = {}) {
+// Each model step answers from `steps` (a response by default); a compaction makes its own summary request unless told otherwise;
+// a ping answers from `pings` (a warm one by default).
+function world(on: On, opts: { noColor?: boolean; surfaces?: RenderSurface[]; compact?: 'request' | 'skip' | 'reused'; steps?: StepAnswer[]; pings?: PingAnswer[] } = {}) {
   const status: Array<string | undefined> = []
   const forks: number[] = []
   const commands: string[] = []
+  const entered: string[] = []
   on('env.get', ($, e) => ({ value: e.name === 'NO_COLOR' && opts.noColor ? '1' : undefined }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.surfaces', () => ({ value: opts.surfaces ?? [] }))
@@ -59,9 +68,14 @@ function world(on: On, opts: { noColor?: boolean; surfaces?: RenderSurface[]; co
   on('classic.SessionStart', () => ({}))
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
   on('command.register', ($, e) => { commands.push(e.name); return { value: { command: e.name } } })
-  on('model.fork', () => { forks.push(forks.length); return { value: null as never } })
+  on('model.fork', () => {
+    forks.push(forks.length)
+    const answer = opts.pings?.length ? opts.pings.shift() : warmPing
+    return answer === 'refused' ? { deny: 'not sent' } : { value: answer as ModelForkResult }
+  })
+  on('prompt.submit', ($, e) => { entered.push(e.text); return { text: e.text } })
   on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: ['their modes'] }))
-  return { status, forks, commands }
+  return { status, forks, commands, entered }
 }
 
 type Kit = Parameters<TestBody>[0]
@@ -148,7 +162,7 @@ describe('countdown chip', () => {
       expect((await chip())?.props.dimColor).toBe(true)
       await $.turn.complete(turn())
       expect((await chip())?.text).toBe('🌝 60m')
-      // The chip is all it does: no model requests, no commands, no status line.
+      // Short of a 🔥, the chip is all it does: no model requests, no commands, no status line.
       expect(w.forks.length).toBe(0)
       expect(w.commands).toEqual([])
       expect(w.status).toEqual([])
@@ -324,5 +338,96 @@ describe('countdown chip', () => {
     expect((await ui.find({ type: 'Text', text: CHIP }))?.text).toBe('● 60m')
     await clock.advance(30 * MIN)
     expect((await ui.find({ type: 'Text', text: CHIP }))?.text).toBe('◑ 30m')
+  })
+})
+
+describe('🔥 ping', () => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`${surface}: 🔥 alone pings the cache and restarts the clock without a turn`, async ($, on) => {
+      const clock = mock.clock(on, { now: START })
+      const w = world(on)
+      await $.session.start({ ...session, surface, isInteractive: true })
+      const ui = await footer($, surface, [])
+      await $.turn.complete(turn())
+      await clock.advance(50 * MIN)
+      expect((await ui.find({ type: 'Text', text: CHIP }))?.text).toBe('🌘 10m')
+      expect((await $.prompt.submit(prompt('🔥'))).drop).toBe('🔥 Read 200k from the cache: warm for another hour')
+      expect((await ui.find({ type: 'Text', text: CHIP }))?.text).toBe('🌝 60m')
+      // Spaces, and the variation selector some keyboards add, make no other prompt of it.
+      await clock.advance(40 * MIN)
+      expect((await $.prompt.submit(prompt(' 🔥\uFE0F\n'))).drop).toBe('🔥 Read 200k from the cache: warm for another hour')
+      expect((await ui.find({ type: 'Text', text: CHIP }))?.text).toBe('🌝 60m')
+      // Neither 🔥 reached the conversation.
+      expect(w.forks.length).toBe(2)
+      expect(w.entered).toEqual([])
+    })
+  }
+
+  test('🔥 among other words, or with an image, is an ordinary prompt', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = world(on)
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    await $.turn.complete(turn())
+    for (const text of ['🔥 keep going', '🔥🔥', 'fire']) expect((await $.prompt.submit(prompt(text))).text).toBe(text)
+    expect((await $.prompt.submit(prompt('🔥', { attachments: [{ type: 'image', mediaType: 'image/png' }] }))).text).toBe('🔥')
+    expect(w.entered).toEqual(['🔥 keep going', '🔥🔥', 'fire', '🔥'])
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('a ping that found the cache gone, failed or was not sent leaves the clock as it was', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, { pings: [
+      { isAnswered: true, text: 'warm', usage: pingUsage(0, 200000) },
+      { isAnswered: true, text: 'warm', usage: pingUsage(150000, 50000) },
+      { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: pingUsage(0, 0) },
+      { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: pingUsage(0, 0) },
+      { isAnswered: false, reason: 'aborted', usage: pingUsage(0, 0) },
+      { isAnswered: false, reason: 'nothing-to-fork' },
+      null,
+      'refused',
+    ] })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    const ui = await footer($, 'terminal', [])
+    await $.turn.complete(turn())
+    await clock.advance(40 * MIN)
+    const drops: Array<string | undefined> = []
+    for (let i = 0; i < 8; i++) drops.push((await $.prompt.submit(prompt('🔥'))).drop)
+    expect(drops).toEqual([
+      '🔥 Read 0 and wrote 200k: the cache had already gone',
+      '🔥 Read 150k and wrote 50k: the cache had already gone',
+      '🔥 The ping failed (529)',
+      '🔥 The ping failed (unknown)',
+      '🔥 The ping was interrupted',
+      '🔥 Nothing to ping until the next message',
+      '🔥 The ping was not sent',
+      '🔥 The ping was not sent',
+    ])
+    expect((await ui.find({ type: 'Text', text: CHIP }))?.text).toBe('🌘 20m')
+    expect(w.entered).toEqual([])
+  })
+
+  test('a ping that read the cache before its request failed still restarts the clock', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    world(on, { pings: [{ isAnswered: false, reason: 'empty-reply', usage: pingUsage(200000, 0) }] })
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    const ui = await footer($, 'terminal', [])
+    await $.turn.complete(turn())
+    await clock.advance(40 * MIN)
+    expect((await $.prompt.submit(prompt('🔥'))).drop).toBe('🔥 Read 200k from the cache: warm for another hour')
+    expect((await ui.find({ type: 'Text', text: CHIP }))?.text).toBe('🌝 60m')
+  })
+
+  test('a clock with nothing on it, or already cold, is not pinged', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on)
+    await $.session.start({ ...session, surface: 'terminal', isInteractive: true })
+    const ui = await footer($, 'terminal', [])
+    expect((await $.prompt.submit(prompt('🔥'))).drop).toBe('🔥 Nothing to ping until the next message')
+    await $.turn.complete(turn())
+    await clock.advance(HOUR)
+    expect((await $.prompt.submit(prompt('🔥'))).drop).toBe('🔥 Not pinged: the cache has gone cold, and a ping would pay to write it again')
+    expect((await ui.find({ type: 'Text', text: CHIP }))?.text).toBe('💀 Cold')
+    expect(w.forks.length).toBe(0)
+    expect(w.entered).toEqual([])
   })
 })
